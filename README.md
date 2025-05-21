@@ -30,8 +30,8 @@ A PHP program for creating professional PDF books from Markdown files. The gener
 
 1. Clone the repository or download as a ZIP file:
    ```bash
-   git clone https://github.com/username/markdown-pdf-book-generator.git
-   cd markdown-pdf-book-generator
+   git clone https://github.com/Ubivis/bookcreator.git
+   cd bookcreator
    ```
 
 2. Install dependencies:
