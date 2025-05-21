@@ -14,6 +14,7 @@ Ein PHP-Programm zur Erstellung professioneller PDF-Bücher aus Markdown-Dateien
 - Lokaler Datei-Upload
 - Typografische Verbesserungen (Anführungszeichen, Gedankenstriche, etc.)
 - Flexible Konfiguration über JSON-Metadaten
+- Benutzerdefinierte Akttitel über JSON-Konfiguration
 - Bildeinbindung für Akte und innerhalb des Textes
 - Verschiedene Buchformate (A4, A5, etc.)
 
@@ -147,7 +148,22 @@ Sie können eine `metadata.json`-Datei im Hauptverzeichnis Ihres Buchs erstellen
   "margin_right": 20,
   "margin_top": 25,
   "margin_bottom": 25,
-  "hyphenate": true
+  "hyphenate": true,
+  
+  "acts": [
+    {
+      "number": 1,
+      "title": "Der Anfang"
+    },
+    {
+      "number": 2,
+      "title": "Die Wendung"
+    },
+    {
+      "number": 3,
+      "title": "Das Finale"
+    }
+  ]
 }
 ```
 
@@ -170,6 +186,40 @@ Sie können eine `metadata.json`-Datei im Hauptverzeichnis Ihres Buchs erstellen
 | margin_top | Oberer Rand in mm | 25 |
 | margin_bottom | Unterer Rand in mm | 25 |
 | hyphenate | Silbentrennung aktivieren | true/false |
+| acts | Array von Akt-Definitionen | Siehe nächster Abschnitt |
+
+### Benutzerdefinierte Akttitel
+
+Mit dem `acts`-Array können Sie benutzerdefinierte Titel für Ihre Akte definieren. Dies ermöglicht es Ihnen, aussagekräftigere Titel als nur "1. Akt", "2. Akt" usw. zu verwenden.
+
+```json
+{
+  "acts": [
+    {
+      "number": 1,
+      "title": "Der mysteriöse Fall"
+    },
+    {
+      "number": 2,
+      "title": "Verschwörungen und Verrat"
+    },
+    {
+      "number": 3,
+      "title": "Rettung und Enthüllung"
+    }
+  ]
+}
+```
+
+- `number`: Die Nummer des Akts (entspricht der Nummer in den Verzeichnisnamen wie "1. Akt")
+- `title`: Der zu verwendende Titel für diesen Akt
+
+Mit dieser Konfiguration werden die Akte im PDF als "1. Akt: Der mysteriöse Fall", "2. Akt: Verschwörungen und Verrat" usw. angezeigt. Dies verbessert die Navigation und gibt dem Leser einen besseren Überblick über die Struktur Ihres Buchs.
+
+Die benutzerdefinierten Akttitel werden in der PDF-Ausgabe an folgenden Stellen verwendet:
+- Als Überschrift auf den Akt-Titelseiten
+- In den Lesezeichen für die Navigation
+- Im Inhaltsverzeichnis
 
 ## Bildeinbindung
 
@@ -210,6 +260,7 @@ Ein Cover-Bild kann in der metadata.json angegeben werden:
 - **Konsistenz**: Verwenden Sie konsistente Formatierung in allen Markdown-Dateien.
 - **Kapitelgröße**: Teilen Sie Ihren Text in überschaubare Kapitel auf.
 - **Versionskontrolle**: Bei Verwendung von GitHub können Sie die Versionshistorie Ihres Buchs verfolgen.
+- **Akttitel**: Nutzen Sie aussagekräftige Akttitel über die JSON-Konfiguration, um die Navigation zu verbessern.
 
 ## Fehlerbehebung
 
@@ -218,6 +269,7 @@ Ein Cover-Bild kann in der metadata.json angegeben werden:
 - Stellen Sie sicher, dass die Bilder in den richtigen Verzeichnissen liegen.
 - Überprüfen Sie die Bildpfade in Ihren Markdown-Dateien.
 - Prüfen Sie das Debug-Log unter `output/debug_log.txt` für detaillierte Informationen.
+- Prüfen Sie, ob die Bildgrößen unter den Limits Ihres Webservers liegen. Bei großen Bildern (>1MB) kann es zu Problemen kommen.
 
 ### GitHub-Zugriffsprobleme
 
@@ -229,6 +281,7 @@ Ein Cover-Bild kann in der metadata.json angegeben werden:
 - Überprüfen Sie die PHP-Fehlerprotokolle Ihres Servers.
 - Stellen Sie sicher, dass alle Abhängigkeiten korrekt installiert sind.
 - Prüfen Sie, ob das `output`-Verzeichnis existiert und beschreibbar ist.
+- Bei Problemen mit Akttiteln, überprüfen Sie das Format Ihrer JSON-Datei.
 
 ## GitHub-Token erhalten
 
