@@ -30,7 +30,7 @@ class BookGenerator {
     public function __construct(array $config = []) {
         // Standard-Konfiguration
         $this->config = array_merge([
-            'format' => 'A5',
+            'format' => 'A4',
             'margin_left' => 20,
             'margin_right' => 20,
             'margin_top' => 20,
@@ -93,7 +93,10 @@ class BookGenerator {
                     if (isset($jsonData['margin_top'])) $this->config['margin_top'] = $jsonData['margin_top'];
                     if (isset($jsonData['margin_bottom'])) $this->config['margin_bottom'] = $jsonData['margin_bottom'];
                     if (isset($jsonData['hyphenate'])) $this->config['hyphenate'] = $jsonData['hyphenate'];
-                    
+                    if (isset($jsonData['acts'])) {
+                        $metadata['act_titles'] = $jsonData['acts'];
+                    }
+
                     break; // Beenden nach der ersten gefundenen Metadaten-Datei
                 }
             }
@@ -130,7 +133,8 @@ class BookGenerator {
             'cover_image' => '',
             'format' => $this->config['format'],
             'font' => $this->config['default_font'],
-            'font_size' => $this->config['default_font_size']
+            'font_size' => $this->config['default_font_size'],
+            'acts' => [] // Leeres Array für Akte initialisieren
         ];
         
         foreach ($metadataFiles as $file) {
@@ -145,6 +149,9 @@ class BookGenerator {
                 
                 $jsonData = json_decode($jsonContent, true);
                 if ($jsonData) {
+                    // Debug-Ausgabe der geladenen JSON
+                    file_put_contents('output/loaded_json.txt', print_r($jsonData, true));
+                    
                     // Gefundene Metadaten mit Standardwerten zusammenführen
                     $metadata = array_merge($metadata, $jsonData);
                     
@@ -169,29 +176,8 @@ class BookGenerator {
             }
         }
         
-        // Cover-Bild herunterladen, falls in den Metadaten angegeben
-        if (!empty($metadata['cover_image'])) {
-            try {
-                $coverPath = ($dirPath ? "$dirPath/" : "") . $metadata['cover_image'];
-                $coverContent = $client->api('repo')->contents()->download(
-                    $username, 
-                    $repository, 
-                    $coverPath, 
-                    $branch
-                );
-                
-                // Speichern des Cover-Bildes im output-Verzeichnis
-                $extension = pathinfo($metadata['cover_image'], PATHINFO_EXTENSION);
-                $localCoverPath = "output/cover.$extension";
-                file_put_contents($localCoverPath, $coverContent);
-                
-                // Pfad in den Metadaten aktualisieren
-                $metadata['cover_image'] = $localCoverPath;
-            } catch (Exception $e) {
-                // Cover nicht gefunden - leeren
-                $metadata['cover_image'] = '';
-            }
-        }
+        // Debug-Ausgabe der gesamten Metadaten
+        file_put_contents('output/metadata_debug.txt', print_r($metadata, true));
         
         return $metadata;
     }
@@ -276,6 +262,117 @@ class BookGenerator {
     }
 
     /**
+     * Verbesserte Funktion zum Herunterladen von Dateien aus GitHub
+     * Umgeht die API-Einschränkungen für große Dateien
+     * 
+     * @param object $client GitHub-Client (kann null sein, wenn Token separat übergeben wird)
+     * @param string $username GitHub-Benutzername
+     * @param string $repository Repository-Name
+     * @param string $path Pfad zur Datei im Repository
+     * @param string $branch Branch-Name
+     * @param string $token GitHub API-Token (optional, wenn $client bereits authentifiziert ist)
+     * @param string $outputPath Lokaler Pfad zum Speichern der Datei (optional)
+     * @return string|bool Dateinhalt als String oder true, wenn in $outputPath gespeichert wurde
+     */
+    private function downloadLargeFileFromGitHub($client, $username, $repository, $path, $branch = 'main', $token = null, $outputPath = null) {
+        // Debug-Ausgabe
+        file_put_contents('output/download_debug.txt', "Versuche großen Download: $path\n", FILE_APPEND);
+        
+        try {
+            // Zuerst den Standard-API-Ansatz versuchen
+            if ($client) {
+                try {
+                    $content = $client->api('repo')->contents()->download(
+                        $username, 
+                        $repository, 
+                        $path, 
+                        $branch
+                    );
+                    
+                    // Wenn erfolgreich und outputPath angegeben, Datei speichern
+                    if ($outputPath) {
+                        // Verzeichnispfad erstellen, falls er nicht existiert
+                        $outputDir = dirname($outputPath);
+                        if (!file_exists($outputDir) && $outputDir !== '.') {
+                            mkdir($outputDir, 0755, true);
+                        }
+                        
+                        file_put_contents($outputPath, $content);
+                        return true;
+                    }
+                    
+                    return $content;
+                } catch (Exception $e) {
+                    // Fehler protokollieren, aber weitermachen mit alternativem Ansatz
+                    file_put_contents('output/download_debug.txt', "API-Download fehlgeschlagen: " . $e->getMessage() . "\nVersuche raw Download...\n", FILE_APPEND);
+                }
+            }
+            
+            // Falls der erste Ansatz fehlschlägt oder kein Client übergeben wurde,
+            // direkten Download von raw.githubusercontent.com versuchen
+            
+            // Pfad für die URL richtig codieren - Leerzeichen ersetzen
+            $encodedPath = str_replace(' ', '%20', $path);
+            
+            // URL zur Raw-Datei erstellen
+            $rawUrl = "https://raw.githubusercontent.com/$username/$repository/$branch/$encodedPath";
+            
+            // Debug-Ausgabe
+            file_put_contents('output/download_debug.txt', "Raw URL: $rawUrl\n", FILE_APPEND);
+            
+            // Kontext-Optionen erstellen
+            $contextOptions = [
+                'http' => [
+                    'timeout' => 30, // 30 Sekunden Timeout
+                    'header' => "User-Agent: PHP GitHub Downloader\r\n"
+                ]
+            ];
+            
+            // Wenn ein Token übergeben wurde, es zum Header hinzufügen
+            if ($token) {
+                $contextOptions['http']['header'] .= "Authorization: token $token\r\n";
+            }
+            
+            $context = stream_context_create($contextOptions);
+            
+            // Datei herunterladen
+            $content = @file_get_contents($rawUrl, false, $context);
+            
+            if ($content === false) {
+                // Wenn das fehlschlägt, versuchen wir es mit urlencode für den gesamten Pfad
+                $fullyEncodedPath = implode('/', array_map('urlencode', explode('/', $path)));
+                $rawUrl = "https://raw.githubusercontent.com/$username/$repository/$branch/$fullyEncodedPath";
+                
+                file_put_contents('output/download_debug.txt', "Erster Raw-Download fehlgeschlagen, versuche mit vollständig kodiertem Pfad: $rawUrl\n", FILE_APPEND);
+                
+                $content = @file_get_contents($rawUrl, false, $context);
+                
+                if ($content === false) {
+                    throw new Exception("Konnte Datei nicht über raw.githubusercontent.com herunterladen: $rawUrl");
+                }
+            }
+            
+            // Wenn outputPath angegeben, Datei speichern
+            if ($outputPath) {
+                // Verzeichnispfad erstellen, falls er nicht existiert
+                $outputDir = dirname($outputPath);
+                if (!file_exists($outputDir) && $outputDir !== '.') {
+                    mkdir($outputDir, 0755, true);
+                }
+                
+                file_put_contents($outputPath, $content);
+                return true;
+            }
+            
+            return $content;
+        } catch (Exception $e) {
+            file_put_contents('output/download_debug.txt', "Download fehlgeschlagen: " . $e->getMessage() . "\n", FILE_APPEND);
+            throw $e; // Fehler weiterleiten
+        }
+    }
+
+    
+    /**
      * Lädt Markdown-Dateien aus einer GitHub-Verzeichnisstruktur
      * 
      * @param string $username GitHub-Benutzername
@@ -337,35 +434,44 @@ class BookGenerator {
                     $imagePath = ($dirPath ? "$dirPath/" : "") . "{$actDir['name']}/Akt$actIndex.$format";
                     
                     try {
-                        $imageContent = $client->api('repo')->contents()->download(
+                        // Verbesserte Download-Methode für große Bilder verwenden
+                        $outputPath = "output/Akt$actIndex.$format";
+                        $success = $this->downloadLargeFileFromGitHub(
+                            $client, 
                             $username, 
                             $repository, 
                             $imagePath, 
-                            $branch
+                            $branch, 
+                            $token, 
+                            $outputPath
                         );
                         
-                        // Bild lokal speichern für spätere Verwendung
-                        $outputDir = "output";
-                        if (!file_exists($outputDir)) {
-                            mkdir($outputDir, 0755, true);
+                        if ($success) {
+                            file_put_contents('output/download_debug.txt', "Bild erfolgreich heruntergeladen: $imagePath\n", FILE_APPEND);
+                            break; // Beenden, wenn ein Bild gefunden wurde
                         }
-                        file_put_contents("$outputDir/Akt$actIndex.$format", $imageContent);
-                        break; // Beenden, wenn ein Bild gefunden wurde
                     } catch (Exception $e) {
                         // Alternative Pfade ausprobieren
                         try {
                             // Versuchen, im Hauptverzeichnis des Akts zu suchen
                             $altImagePath = ($dirPath ? "$dirPath/" : "") . "Akt$actIndex.$format";
-                            $imageContent = $client->api('repo')->contents()->download(
+                            
+                            // Verbesserte Download-Methode für große Bilder verwenden
+                            $outputPath = "output/Akt$actIndex.$format";
+                            $success = $this->downloadLargeFileFromGitHub(
+                                $client, 
                                 $username, 
                                 $repository, 
                                 $altImagePath, 
-                                $branch
+                                $branch, 
+                                $token, 
+                                $outputPath
                             );
                             
-                            // Bild lokal speichern
-                            file_put_contents("output/Akt$actIndex.$format", $imageContent);
-                            break; // Beenden, wenn ein Bild gefunden wurde
+                            if ($success) {
+                                file_put_contents('output/download_debug.txt', "Bild erfolgreich heruntergeladen (aus alt. Pfad): $altImagePath\n", FILE_APPEND);
+                                break; // Beenden, wenn ein Bild gefunden wurde
+                            }
                         } catch (Exception $e2) {
                             // Bild nicht gefunden - normal weitermachen
                         }
@@ -393,22 +499,30 @@ class BookGenerator {
                     // Bilder im Aktverzeichnis herunterladen (für Inline-Bilder)
                     if ($item['type'] === 'file' && in_array(pathinfo($item['name'], PATHINFO_EXTENSION), ['png', 'jpg', 'jpeg', 'gif'])) {
                         try {
-                            $imageContent = $client->api('repo')->contents()->download(
+                            // Verbesserte Download-Methode für große Bilder verwenden
+                            $outputPath = "output/" . $item['path'];
+                            
+                            // Verzeichnispfad erstellen, falls er nicht existiert
+                            $outputDir = dirname($outputPath);
+                            if (!file_exists($outputDir) && $outputDir != "output/") {
+                                mkdir($outputDir, 0755, true);
+                            }
+                            
+                            $success = $this->downloadLargeFileFromGitHub(
+                                $client, 
                                 $username, 
                                 $repository, 
                                 $item['path'], 
-                                $branch
+                                $branch, 
+                                $token, 
+                                $outputPath
                             );
                             
-                            // Verzeichnispfad erstellen, falls er nicht existiert
-                            $outputPath = "output/" . dirname($item['path']);
-                            if (!file_exists($outputPath) && $outputPath != "output/") {
-                                mkdir($outputPath, 0755, true);
+                            if ($success) {
+                                file_put_contents('output/download_debug.txt', "Inline-Bild erfolgreich heruntergeladen: " . $item['path'] . "\n", FILE_APPEND);
                             }
-                            
-                            // Bild lokal speichern
-                            file_put_contents("output/" . $item['path'], $imageContent);
                         } catch (Exception $e) {
+                            file_put_contents('output/download_debug.txt', "Fehler beim Herunterladen von Inline-Bild: " . $e->getMessage() . "\n", FILE_APPEND);
                             // Ignorieren, wenn ein Bild nicht heruntergeladen werden kann
                         }
                     }
@@ -431,13 +545,15 @@ class BookGenerator {
                     $markdownContent .= "\n### $chapterName\n";
                     
                     // Kapitelinhalt laden
-                    $chapterContent = $client->api('repo')->contents()->download(
+                    $chapterContent = $this->downloadLargeFileFromGitHub(
+                        $client,
                         $username, 
                         $repository, 
                         $chapterFile['path'], 
-                        $branch
+                        $branch,
+                        $token
                     );
-                    
+
                     // Bildpfade im Markdown korrigieren
                     $chapterContent = $this->fixMarkdownImagePaths($chapterContent, $actPath);
                     
@@ -448,9 +564,28 @@ class BookGenerator {
             // Mit der generierten Markdown-Datei fortfahren
             $success = $this->loadFromString($markdownContent);
             
+            // Debug-Ausgabe des gesamten Markdown-Inhalts
+            file_put_contents('output/debug_markdown.md', $markdownContent);
+            
             // Metadaten in die Buchstruktur einbinden
             if ($success) {
-                $this->bookStructure = array_merge($this->bookStructure, $metadata);
+                // Wichtig: Wir merken uns die Aktnamen aus den Metadaten separat
+                $customActTitles = $metadata['acts'] ?? [];
+                
+                // Standardfelder übernehmen
+                foreach ($metadata as $key => $value) {
+                    if ($key != 'acts') {  // Acts gesondert behandeln
+                        $this->bookStructure[$key] = $value;
+                    }
+                }
+                
+                // Explizit die acts-Metadaten setzen
+                if (!empty($customActTitles)) {
+                    $this->bookStructure['customActTitles'] = $customActTitles;
+                    
+                    // Debug-Ausgabe
+                    file_put_contents('output/act_titles_debug.txt', "Gespeicherte Akttitel:\n" . print_r($customActTitles, true));
+                }
             }
             
             return $success;
@@ -615,8 +750,9 @@ class BookGenerator {
             throw new Exception("Keine Buchstruktur zum Generieren vorhanden");
         }
         
-        // Debug-Ausgabe (Optional)
+        // Debug-Ausgabe erstellen
         file_put_contents('output/debug_log.txt', "Generating PDF: " . date('Y-m-d H:i:s') . "\n", FILE_APPEND);
+        file_put_contents('output/debug_structure.txt', print_r($this->bookStructure, true));
         
         // Titel und Metadaten setzen
         $this->mpdf->SetTitle($this->bookStructure['title']);
@@ -646,83 +782,264 @@ class BookGenerator {
         
         // Buchinhalt hinzufügen
         $actIndex = 1; // Zähler für Akte
-        foreach ($this->bookStructure['acts'] as $act) {
-            // Akt-Titelseite einfügen
-            $this->mpdf->AddPage();
-            
-            // Lesezeichen für den Akt (Ebene 1) hinzufügen
-            $this->mpdf->Bookmark($act['title'], 1);
-            
-            // HTML für Akt-Titel
-            $actHtml = "<h1 class=\"act-title\">{$act['title']}</h1>";
-            
-            // Aktbild suchen mit verbessertem Debugging
-            $actImage = $this->findActImage($actIndex);
-            
-            if ($actImage) {
-                // Absoluten Pfad für das Bild erstellen
-                $absoluteImagePath = realpath($actImage);
-                
-                // Debug-Ausgabe (Optional)
-                file_put_contents('output/debug_log.txt', "Act $actIndex image found: $actImage (Absolute: $absoluteImagePath)\n", FILE_APPEND);
-                
-                if ($absoluteImagePath) {
-                    // Bild einfügen mit absolutem Pfad und expliziten Dimensionen
-                    $actHtml .= "<div class=\"act-image\" style=\"text-align: center; margin: 2cm 0;\">";
-                    // Prüfen, ob es sich um ein lokales Bild handelt
-                    $imgInfo = getimagesize($absoluteImagePath);
-                    $width = $imgInfo[0];
-                    $height = $imgInfo[1];
-                    
-                    // Maximale Breite/Höhe berechnen (basierend auf Seitenformat)
-                    $maxWidth = 400; // px
-                    $maxHeight = 500; // px
-                    
-                    // Skalierungsfaktor berechnen
-                    $scaleWidth = $maxWidth / $width;
-                    $scaleHeight = $maxHeight / $height;
-                    $scale = min($scaleWidth, $scaleHeight, 1); // Nicht vergrößern, nur verkleinern
-                    
-                    // Neue Dimensionen berechnen
-                    $newWidth = round($width * $scale);
-                    $newHeight = round($height * $scale);
-                    
-                    // Bild mit expliziten Dimensionen einfügen
-                    $actHtml .= "<img src=\"$absoluteImagePath\" width=\"$newWidth\" height=\"$newHeight\" />";
-                    $actHtml .= "</div>";
-                } else {
-                    // Debug-Ausgabe (Optional)
-                    file_put_contents('output/debug_log.txt', "WARNING: Could not get absolute path for $actImage\n", FILE_APPEND);
+        
+        // Debug-Ausgabe der benutzerdefinierten Akttitel
+        if (isset($this->bookStructure['customActTitles'])) {
+            file_put_contents('output/debug_log.txt', "Benutzerdefinierte Akttitel gefunden: " . 
+                            print_r($this->bookStructure['customActTitles'], true), FILE_APPEND);
+        } else {
+            file_put_contents('output/debug_log.txt', "KEINE benutzerdefinierten Akttitel gefunden\n", FILE_APPEND);
+        }
+        
+        // Überprüfen, ob 'acts' ein Array mit Kapitelstruktur oder ein Array mit Titeldaten ist
+        $hasTraditionalStructure = false;
+        if (isset($this->bookStructure['acts']) && is_array($this->bookStructure['acts'])) {
+            // Prüfen, ob mindestens ein Act eine 'chapters' Array-Eigenschaft hat
+            foreach ($this->bookStructure['acts'] as $actKey => $act) {
+                if (is_array($act) && isset($act['chapters']) && is_array($act['chapters'])) {
+                    $hasTraditionalStructure = true;
+                    break;
                 }
-            } else {
-                // Debug-Ausgabe (Optional)
-                file_put_contents('output/debug_log.txt', "No image found for Act $actIndex\n", FILE_APPEND);
             }
+        }
+        
+        if ($hasTraditionalStructure) {
+            // Traditionelle Kapitelstruktur verwenden
+            file_put_contents('output/debug_log.txt', "Verwende traditionelle Kapitelstruktur\n", FILE_APPEND);
             
-            $this->mpdf->WriteHTML($actHtml);
-            
-            foreach ($act['chapters'] as $chapter) {
+            foreach ($this->bookStructure['acts'] as $actKey => $act) {
+                // Akt-Titelseite einfügen
                 $this->mpdf->AddPage();
                 
-                // Lesezeichen für das Kapitel (Ebene 2) hinzufügen
-                $this->mpdf->Bookmark($chapter['title'], 2);
+                // Aktnummer und Titel bestimmen
+                $actNumber = 0;
+                preg_match('/(\d+)\./', $act['title'], $matches);
+                if (isset($matches[1])) {
+                    $actNumber = (int)$matches[1];
+                } else {
+                    $actNumber = $actIndex;
+                }
                 
-                // Kapitelüberschrift
-                $this->mpdf->WriteHTML("<h2 class=\"chapter-title\">{$chapter['title']}</h2>");
+                $actTitle = $act['title']; // Standard-Titel (z.B. "1. Akt")
                 
-                // Kapitelinhalt als HTML (von Markdown konvertiert)
-                $html = $this->markdown->text($chapter['content']);
+                // Wenn benutzerdefinierte Aktnamen in den Metadaten existieren
+                if (isset($this->bookStructure['customActTitles']) && is_array($this->bookStructure['customActTitles'])) {
+                    // Suche nach einem passenden Akt in der Metadaten-Struktur
+                    foreach ($this->bookStructure['customActTitles'] as $metaAct) {
+                        if (isset($metaAct['number']) && $metaAct['number'] == $actNumber) {
+                            $actTitle = $actNumber . ". Akt: " . $metaAct['title'];
+                            file_put_contents('output/debug_log.txt', "Akttitel gefunden: $actTitle für Akt $actNumber\n", FILE_APPEND);
+                            break;
+                        }
+                    }
+                }
                 
-                // Typografische Verbesserungen
+                // Lesezeichen für den Akt hinzufügen
+                $this->mpdf->Bookmark($actTitle, 0);
+                
+                // HTML für Akt-Titel
+                $actHtml = "<h1 class=\"act-title\">{$actTitle}</h1>";
+                
+                // Aktbild suchen
+                $actImage = $this->findActImage($actNumber);
+                
+                if ($actImage) {
+                    // Absoluten Pfad für das Bild erstellen
+                    $absoluteImagePath = realpath($actImage);
+                    
+                    if ($absoluteImagePath) {
+                        // Bild einfügen mit absolutem Pfad und expliziten Dimensionen
+                        $actHtml .= "<div class=\"act-image\" style=\"text-align: center; margin: 2cm 0;\">";
+                        // Prüfen, ob es sich um ein lokales Bild handelt
+                        $imgInfo = getimagesize($absoluteImagePath);
+                        $width = $imgInfo[0];
+                        $height = $imgInfo[1];
+                        
+                        // Maximale Breite/Höhe berechnen
+                        $maxWidth = 400; // px
+                        $maxHeight = 500; // px
+                        
+                        // Skalierungsfaktor berechnen
+                        $scaleWidth = $maxWidth / $width;
+                        $scaleHeight = $maxHeight / $height;
+                        $scale = min($scaleWidth, $scaleHeight, 1); // Nicht vergrößern, nur verkleinern
+                        
+                        // Neue Dimensionen berechnen
+                        $newWidth = round($width * $scale);
+                        $newHeight = round($height * $scale);
+                        
+                        // Bild mit expliziten Dimensionen einfügen
+                        $actHtml .= "<img src=\"$absoluteImagePath\" width=\"$newWidth\" height=\"$newHeight\" />";
+                        $actHtml .= "</div>";
+                    }
+                }
+                
+                $this->mpdf->WriteHTML($actHtml);
+                
+                // Kapitel verarbeiten
+                if (isset($act['chapters']) && is_array($act['chapters'])) {
+                    foreach ($act['chapters'] as $chapterTitle => $chapter) {
+                        $this->mpdf->AddPage();
+                        
+                        // Lesezeichen für das Kapitel hinzufügen
+                        $this->mpdf->Bookmark($chapter['title'], 1);
+                        
+                        // Kapitelüberschrift
+                        $this->mpdf->WriteHTML("<h2 class=\"chapter-title\">{$chapter['title']}</h2>");
+                        
+                        // Kapitelinhalt als HTML (von Markdown konvertiert)
+                        $html = $this->markdown->text($chapter['content']);
+                        
+                        // Typografische Verbesserungen
+                        $html = $this->improveTypography($html);
+                        
+                        // Bilder im Markdown-Inhalt korrigieren
+                        $html = $this->enhancedFixImagePaths($html);
+                        
+                        $this->mpdf->WriteHTML($html);
+                    }
+                }
+                
+                $actIndex++;
+            }
+        } else {
+            // Alternative Verarbeitung, wenn keine traditionelle Struktur vorhanden ist
+            file_put_contents('output/debug_log.txt', "Verwende alternative Struktur\n", FILE_APPEND);
+            
+            // Temporäre Variable für den Markdown-Inhalt
+            $markdownContent = "";
+            if (isset($this->bookStructure['_markdownContent'])) {
+                $markdownContent = $this->bookStructure['_markdownContent'];
+            } else {
+                // Debug-Ausgabe des Markdown-Inhalts aus output/debug_markdown.md laden, falls vorhanden
+                if (file_exists('output/debug_markdown.md')) {
+                    $markdownContent = file_get_contents('output/debug_markdown.md');
+                }
+            }
+            
+            // Akte aus dem ursprünglichen Markdown-Inhalt extrahieren
+            $lines = explode("\n", $markdownContent ?? '');
+            $currentAct = null;
+            $currentChapter = null;
+            $chapterContent = '';
+            
+            foreach ($lines as $line) {
+                // Akt-Überschrift (H2)
+                if (preg_match('/^## (.+)$/', $line, $matches)) {
+                    // Vorheriges Kapitel abschließen, falls vorhanden
+                    if ($currentChapter !== null && !empty($chapterContent)) {
+                        $this->mpdf->AddPage();
+                        $this->mpdf->Bookmark($currentChapter, 1);
+                        $this->mpdf->WriteHTML("<h2 class=\"chapter-title\">{$currentChapter}</h2>");
+                        
+                        $html = $this->markdown->text($chapterContent);
+                        $html = $this->improveTypography($html);
+                        $html = $this->enhancedFixImagePaths($html);
+                        
+                        $this->mpdf->WriteHTML($html);
+                        $chapterContent = '';
+                    }
+                    
+                    // Neuen Akt starten
+                    $currentAct = trim($matches[1]);
+                    $currentChapter = null;
+                    
+                    // Aktnummer extrahieren
+                    $actNumber = 0;
+                    preg_match('/(\d+)\./', $currentAct, $matches);
+                    if (isset($matches[1])) {
+                        $actNumber = (int)$matches[1];
+                    } else {
+                        $actNumber = $actIndex;
+                    }
+                    
+                    // Aktname aus der JSON-Metadaten ergänzen, falls vorhanden
+                    $actTitle = $currentAct;
+                    if (isset($this->bookStructure['customActTitles']) && is_array($this->bookStructure['customActTitles'])) {
+                        foreach ($this->bookStructure['customActTitles'] as $metaAct) {
+                            if (isset($metaAct['number']) && $metaAct['number'] == $actNumber) {
+                                $actTitle = $actNumber . ". Akt: " . $metaAct['title'];
+                                file_put_contents('output/debug_log.txt', "Alt. Struktur: Akttitel gefunden: $actTitle für Akt $actNumber\n", FILE_APPEND);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Akt-Seite hinzufügen
+                    $this->mpdf->AddPage();
+                    $this->mpdf->Bookmark($actTitle, 0);
+                    
+                    $actHtml = "<h1 class=\"act-title\">{$actTitle}</h1>";
+                    
+                    // Aktbild hinzufügen
+                    $actImage = $this->findActImage($actNumber);
+                    if ($actImage) {
+                        $absoluteImagePath = realpath($actImage);
+                        if ($absoluteImagePath) {
+                            $actHtml .= "<div class=\"act-image\" style=\"text-align: center; margin: 2cm 0;\">";
+                            $imgInfo = getimagesize($absoluteImagePath);
+                            $width = $imgInfo[0];
+                            $height = $imgInfo[1];
+                            
+                            $maxWidth = 400;
+                            $maxHeight = 500;
+                            
+                            $scaleWidth = $maxWidth / $width;
+                            $scaleHeight = $maxHeight / $height;
+                            $scale = min($scaleWidth, $scaleHeight, 1);
+                            
+                            $newWidth = round($width * $scale);
+                            $newHeight = round($height * $scale);
+                            
+                            $actHtml .= "<img src=\"$absoluteImagePath\" width=\"$newWidth\" height=\"$newHeight\" />";
+                            $actHtml .= "</div>";
+                        }
+                    }
+                    
+                    $this->mpdf->WriteHTML($actHtml);
+                    $actIndex++;
+                    continue;
+                }
+                
+                // Kapitel-Überschrift (H3)
+                if (preg_match('/^### (.+)$/', $line, $matches)) {
+                    // Vorheriges Kapitel abschließen, falls vorhanden
+                    if ($currentChapter !== null && !empty($chapterContent)) {
+                        $this->mpdf->AddPage();
+                        $this->mpdf->Bookmark($currentChapter, 1);
+                        $this->mpdf->WriteHTML("<h2 class=\"chapter-title\">{$currentChapter}</h2>");
+                        
+                        $html = $this->markdown->text($chapterContent);
+                        $html = $this->improveTypography($html);
+                        $html = $this->enhancedFixImagePaths($html);
+                        
+                        $this->mpdf->WriteHTML($html);
+                        $chapterContent = '';
+                    }
+                    
+                    // Neues Kapitel starten
+                    $currentChapter = trim($matches[1]);
+                    continue;
+                }
+                
+                // Inhalt zum aktuellen Kapitel hinzufügen
+                if ($currentChapter !== null) {
+                    $chapterContent .= $line . "\n";
+                }
+            }
+            
+            // Letztes Kapitel abschließen
+            if ($currentChapter !== null && !empty($chapterContent)) {
+                $this->mpdf->AddPage();
+                $this->mpdf->Bookmark($currentChapter, 1);
+                $this->mpdf->WriteHTML("<h2 class=\"chapter-title\">{$currentChapter}</h2>");
+                
+                $html = $this->markdown->text($chapterContent);
                 $html = $this->improveTypography($html);
-                
-                // Bilder im Markdown-Inhalt korrigieren (mit verbesserter Pfadauflösung)
                 $html = $this->enhancedFixImagePaths($html);
                 
                 $this->mpdf->WriteHTML($html);
             }
-            
-            $actIndex++; // Aktzähler erhöhen
         }
         
         // PDF speichern
